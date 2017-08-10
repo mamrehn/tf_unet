@@ -56,7 +56,7 @@ def plot_prediction(x_test, y_test, prediction, save=False):
 
 def to_rgb(img):
     """
-    Converts the given array into a RGB image. If the number of channels is not
+    Converts the given array into an RGB image. If the number of channels is not
     3 the array is tiled such that it has 3 channels. Finally, the values are
     rescaled to [0,255) 
     
@@ -64,15 +64,25 @@ def to_rgb(img):
     
     :returns img: the rgb image [nx, ny, 3]
     """
+    if isinstance(img, np.floating):
+        img[np.isnan(img)] = 0
+    else:
+        img = img.astype(np.float64)
+    img -= np.amin(img)
+    max_ = np.amax(img)
+    if 0 != max_:
+        img /= np.amax(img)
+        img *= 255
+
     img = np.atleast_3d(img)
     channels = img.shape[2]
-    if channels < 3:
+    if 1 == channels:
         img = np.tile(img, 3)
-    
-    img[np.isnan(img)] = 0
-    img -= np.amin(img)
-    img /= np.amax(img)
-    img *= 255
+    elif 2 == channels:
+        img_ = np.zeros((img.shape[0], img.shape[1], 3), dtype=img.dtype)
+        img_[:, :, :2] = img
+        img = img_
+
     return img
 
 def crop_to_shape(data, shape):
