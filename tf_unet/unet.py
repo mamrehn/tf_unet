@@ -29,8 +29,8 @@ import tensorflow as tf
 
 from tf_unet import util
 from tf_unet.layers import (weight_variable, weight_variable_devonc, bias_variable,
-                            conv2d, deconv2d, max_pool, crop_and_concat, pixel_wise_softmax_2,
-                            cross_entropy)
+                            conv2d, conv2d_without_dropout, deconv2d, max_pool, crop_and_concat,
+                            pixel_wise_softmax_2, cross_entropy)
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(message)s')
 
@@ -51,8 +51,8 @@ def create_conv_net(x, keep_prob, channels, n_class, layers=3, features_root=16,
     :param summaries: Flag if summaries should be created
     """
 
-    lt = "Layers {layers}, features {features}, filter size {filter_size}x{filter_size}, pool size: {pool_size}x{pool_size}"
-    logging.info(lt.format(layers=layers, features=features_root, filter_size=filter_size, pool_size=pool_size))
+    lt = "Layers {lay}, features {feat}, filter size {f_size}x{f_size}, pool size: {p_size}x{p_size}"
+    logging.info(lt.format(lay=layers, feat=features_root, f_size=filter_size, p_size=pool_size))
 
     # Placeholder for the input image
     nx = tf.shape(x)[1]
@@ -73,20 +73,21 @@ def create_conv_net(x, keep_prob, channels, n_class, layers=3, features_root=16,
     size = in_size
     # down layers
     for layer in range(0, layers):
+        seed = layer * 4
         features = 2 ** layer * features_root
         stddev = np.sqrt(2 / (filter_size ** 2 * features))
         if layer == 0:
-            w1 = weight_variable([filter_size, filter_size, channels, features], stddev)
+            w1 = weight_variable(shape=[filter_size, filter_size, channels, features], stddev=stddev, seed=seed)
         else:
-            w1 = weight_variable([filter_size, filter_size, features // 2, features], stddev)
+            w1 = weight_variable(shape=[filter_size, filter_size, features // 2, features], stddev=stddev, seed=seed)
 
-        w2 = weight_variable([filter_size, filter_size, features, features], stddev)
+        w2 = weight_variable(shape=[filter_size, filter_size, features, features], stddev=stddev, seed=(seed + 1))
         b1 = bias_variable([features])
         b2 = bias_variable([features])
 
-        conv1 = conv2d(in_node, w1, keep_prob)
+        conv1 = conv2d(x=in_node, W=w1, keep_prob_=keep_prob, seed=(seed + 2))
         tmp_h_conv = tf.nn.relu(conv1 + b1)
-        conv2 = conv2d(tmp_h_conv, w2, keep_prob)
+        conv2 = conv2d(x=tmp_h_conv, W=w2, keep_prob_=keep_prob, seed=(seed + 3))
         dw_h_convs[layer] = tf.nn.relu(conv2 + b2)
 
         weights.append((w1, w2))
@@ -103,23 +104,24 @@ def create_conv_net(x, keep_prob, channels, n_class, layers=3, features_root=16,
 
     # up layers
     for layer in range(layers - 2, -1, -1):
+        seed = layer * 5 * 5
         features = 2 ** (layer + 1) * features_root
         stddev = np.sqrt(2 / (filter_size ** 2 * features))
 
-        wd = weight_variable_devonc([pool_size, pool_size, features // 2, features], stddev)
+        wd = weight_variable_devonc([pool_size, pool_size, features // 2, features], stddev=stddev, seed=seed)
         bd = bias_variable([features // 2])
         h_deconv = tf.nn.relu(deconv2d(in_node, wd, pool_size) + bd)
         h_deconv_concat = crop_and_concat(dw_h_convs[layer], h_deconv)
         deconv[layer] = h_deconv_concat
 
-        w1 = weight_variable([filter_size, filter_size, features, features // 2], stddev)
-        w2 = weight_variable([filter_size, filter_size, features // 2, features // 2], stddev)
+        w1 = weight_variable(shape=[filter_size, filter_size, features, features // 2], stddev=stddev, seed=(seed + 1))
+        w2 = weight_variable(shape=[filter_size, filter_size, features // 2, features // 2], stddev=stddev, seed=(seed + 2))
         b1 = bias_variable([features // 2])
         b2 = bias_variable([features // 2])
 
-        conv1 = conv2d(h_deconv_concat, w1, keep_prob)
+        conv1 = conv2d(x=h_deconv_concat, W=w1, keep_prob_=keep_prob, seed=(seed + 3))
         h_conv = tf.nn.relu(conv1 + b1)
-        conv2 = conv2d(h_conv, w2, keep_prob)
+        conv2 = conv2d(x=h_conv, W=w2, keep_prob_=keep_prob, seed=(seed + 4))
         in_node = tf.nn.relu(conv2 + b2)
         up_h_convs[layer] = in_node
 
@@ -131,9 +133,10 @@ def create_conv_net(x, keep_prob, channels, n_class, layers=3, features_root=16,
         size -= 4
 
     # Output Map
-    weight = weight_variable([1, 1, features_root, n_class], stddev)
+    weight = weight_variable(shape=[1, 1, features_root, n_class], seed=42, stddev=stddev)
     bias = bias_variable([n_class])
-    conv = conv2d(in_node, weight, tf.constant(1.0))
+    # conv = conv2d(x=in_node, W=weight, keep_prob_=tf.constant(1.0), seed=0)
+    conv = conv2d_without_dropout(x=in_node, W=weight)
     output_map = tf.nn.relu(conv + bias)
     up_h_convs["out"] = output_map
 
@@ -177,6 +180,9 @@ class Unet(object):
     """
 
     def __init__(self, channels=3, n_class=2, cost="cross_entropy", cost_kwargs={}, **kwargs):
+        if "seed" in kwargs:
+            tf.set_random_seed(kwargs.pop("seed"))
+
         tf.reset_default_graph()
 
         self.n_class = n_class
@@ -184,7 +190,7 @@ class Unet(object):
 
         self.x = tf.placeholder("float", shape=[None, None, None, channels])
         self.y = tf.placeholder("float", shape=[None, None, None, n_class])
-        self.keep_prob = tf.placeholder(tf.float32)  # dropout (keep probability)
+        self.keep_prob = tf.placeholder(tf.float32)  # dropout (probability to keep)
 
         logits, self.variables, self.offset = create_conv_net(self.x, self.keep_prob, channels, n_class, **kwargs)
 
@@ -207,14 +213,16 @@ class Unet(object):
         regularizer: power of the L2 regularizers added to the loss function
         """
 
+        class_weights = cost_kwargs.pop("class_weights", None)
+
         flat_logits = tf.reshape(logits, [-1, self.n_class])
         flat_labels = tf.reshape(self.y, [-1, self.n_class])
         if cost_name == "cross_entropy":
-            class_weights = cost_kwargs.pop("class_weights", None)
-
-            if class_weights is not None:
+            if class_weights is None:
+                loss = tf.reduce_mean(
+                    tf.nn.softmax_cross_entropy_with_logits(logits=flat_logits, labels=flat_labels))
+            else:
                 class_weights = tf.constant(np.array(class_weights, dtype=np.float32))
-
                 weight_map = tf.multiply(flat_labels, class_weights)
                 weight_map = tf.reduce_sum(weight_map, axis=1)
 
@@ -224,29 +232,37 @@ class Unet(object):
 
                 loss = tf.reduce_mean(weighted_loss)
 
-            else:
-                loss = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(logits=flat_logits,
-                                                                              labels=flat_labels))
         elif cost_name == "dice_coefficient":
             # eps = 1e-5
-            eps = tf.constant(value=1e-5)
+            eps = tf.constant(value=(2 ** -14))
             prediction = pixel_wise_softmax_2(logits)
-            prediction[tf.is_nan(prediction)] = 0
-            intersection = tf.reduce_sum(prediction * self.y)
+            # prediction[tf.is_nan(prediction)] = 0
+            prediction = tf.where(tf.is_nan(prediction), tf.zeros_like(prediction), prediction)
+            if class_weights is None:
+                intersection = tf.reduce_sum(prediction * self.y)
+            else:
+                class_weights = tf.constant(np.array(class_weights, dtype=np.float32))
+                intersection = tf.reduce_sum(prediction * self.y * class_weights)
             union = eps + tf.reduce_sum(prediction) + tf.reduce_sum(self.y)
             loss = -(2 * intersection / union)
+            loss = tf.where(tf.is_nan(loss), tf.zeros_like(loss), loss)  # Note: loss is only a scalar value
 
         else:
             raise ValueError("Unknown cost function: " % cost_name)
 
-        regularizer = cost_kwargs.pop("regularizer", None)
-        if regularizer is not None:
+        # regularizer_l1 = cost_kwargs.pop("regularizer_l1", None)
+        # if regularizer_l1 is not None:
+        #     regularizers = sum([tf.nn.l1_loss(variable) for variable in self.variables])
+        #     loss += (regularizer_l1 * regularizers)
+
+        regularizer_l2 = cost_kwargs.pop("regularizer", None)
+        if regularizer_l2 is not None:
             regularizers = sum([tf.nn.l2_loss(variable) for variable in self.variables])
-            loss += (regularizer * regularizers)
+            loss += (regularizer_l2 * regularizers)
 
         return loss
 
-    def predict(self, model_path, x_test):
+    def predict(self, model_path, x_test, total_ram_on_gpu=8096):
         """
         Uses the model to create a prediction for the given data
         
@@ -265,19 +281,19 @@ class Unet(object):
 
             # maximum feasible tensor size is about (90*64*282*282*4), (with upper_limit == 90 in this case)
             # predict iteratively to prevent ResourceExhaustedError
-            factor = 2 ** 22.8 / x_test.size
-            upper_limit = x_test.shape[0] if factor >= 1 else int(x_test.shape[0] * factor)
+            factor = (2 ** 22.78 / x_test.size) * (total_ram_on_gpu / 8096)
+            upper_limit = min(x_test.shape[0], int(x_test.shape[0] * factor))
 
-            y_dummy = np.empty((x_test.shape[0], x_test.shape[1], x_test.shape[2], self.n_class))
+            y_dummy = np.empty((upper_limit, x_test.shape[1], x_test.shape[2], self.n_class))
             if x_test.shape[0] > upper_limit:
                 prediction_parts = []
                 for i in range(0, x_test.shape[0], upper_limit):
                     x_test_part = x_test[i:i + upper_limit]
                     prediction_parts.append(sess.run(
-                        fetches=self.predicter, feed_dict={self.x: x_test_part, self.y: y_dummy, self.keep_prob: 1.}))
-                    prediction = np.concatenate(prediction_parts, axis=0)
+                        fetches=self.predicter, feed_dict={self.x: x_test_part, self.y: y_dummy, self.keep_prob: 1.0}))
+                prediction = np.concatenate(prediction_parts, axis=0)
             else:
-                prediction = sess.run(self.predicter, feed_dict={self.x: x_test, self.y: y_dummy, self.keep_prob: 1.})
+                prediction = sess.run(self.predicter, feed_dict={self.x: x_test, self.y: y_dummy, self.keep_prob: 1.0})
 
         return prediction
 
@@ -326,7 +342,7 @@ class Trainer(object):
         self.opt_kwargs = opt_kwargs
 
     def _get_optimizer(self, training_iters, global_step):
-        if self.optimizer == "momentum":
+        if "momentum" == self.optimizer:
             learning_rate = self.opt_kwargs.pop("learning_rate", 0.2)
             decay_rate = self.opt_kwargs.pop("decay_rate", 0.95)
             momentum = self.opt_kwargs.pop("momentum", 0.2)
@@ -340,7 +356,7 @@ class Trainer(object):
             optimizer = tf.train.MomentumOptimizer(learning_rate=self.learning_rate_node, momentum=momentum,
                                                    **self.opt_kwargs).minimize(self.net.cost,
                                                                                global_step=global_step)
-        elif self.optimizer == "adam":
+        elif "adam" == self.optimizer:
             learning_rate = self.opt_kwargs.pop("learning_rate", 0.001)
             self.learning_rate_node = tf.Variable(learning_rate)
 
@@ -495,12 +511,9 @@ class Trainer(object):
         summary_writer.add_summary(summary_str, step)
         summary_writer.flush()
         logging.info(
-            "Iter {:}, Minibatch Loss= {:.4f}, Training Accuracy= {:.4f}, Minibatch error= {:.1f}%".format(step,
-                                                                                                           loss,
-                                                                                                           acc,
-                                                                                                           error_rate(
-                                                                                                               predictions,
-                                                                                                               batch_y)))
+            "Iter {:}, Minibatch Loss= {:.4f}, Training Accuracy= {:.4f}, Minibatch error= {:.1f}%".format(
+                step, loss, acc, error_rate(predictions, batch_y))
+        )
 
 
 def error_rate(predictions, labels):
@@ -510,13 +523,13 @@ def error_rate(predictions, labels):
 
     return 100.0 - (
         100.0 *
-        np.sum(np.argmax(predictions, 3) == np.argmax(labels, 3)) /
+        np.sum(np.argmax(predictions, axis=3) == np.argmax(labels, axis=3)) /
         (predictions.shape[0] * predictions.shape[1] * predictions.shape[2]))
 
 
 def get_image_summary(img, idx=0):
     """
-    Make an image summary for 4d tensor image with index idx
+    Make an image summary for 4-D tensor image with index idx
     """
 
     V = tf.slice(img, (0, 0, 0, idx), (1, -1, -1, 1))
