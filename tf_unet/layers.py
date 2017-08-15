@@ -21,20 +21,23 @@ from __future__ import print_function, division, absolute_import, unicode_litera
 
 import tensorflow as tf
 
-def weight_variable(shape, stddev=0.1):
-    initial = tf.truncated_normal(shape, stddev=stddev)
+def weight_variable(shape, stddev=0.1, seed=None):
+    initial = tf.truncated_normal(shape, stddev=stddev, seed=seed)
     return tf.Variable(initial)
 
-def weight_variable_devonc(shape, stddev=0.1):
-    return tf.Variable(tf.truncated_normal(shape, stddev=stddev))
+def weight_variable_devonc(shape, stddev=0.1, seed=None):
+    return tf.Variable(tf.truncated_normal(shape, stddev=stddev, seed=seed))
 
 def bias_variable(shape):
     initial = tf.constant(0.1, shape=shape)
     return tf.Variable(initial)
 
-def conv2d(x, W,keep_prob_):
-    conv_2d = tf.nn.conv2d(x, W, strides=[1, 1, 1, 1], padding='VALID')
-    return tf.nn.dropout(conv_2d, keep_prob_)
+def conv2d(x, W, keep_prob_, seed=None):
+    conv_2d = tf.nn.conv2d(input=x, filter=W, strides=[1, 1, 1, 1], padding='VALID')
+    return tf.nn.dropout(conv_2d, keep_prob_, seed=seed)
+
+def conv2d_without_dropout(x, W):
+    return tf.nn.conv2d(input=x, filter=W, strides=[1, 1, 1, 1], padding='VALID')
 
 def deconv2d(x, W,stride):
     x_shape = tf.shape(x)
@@ -60,12 +63,10 @@ def pixel_wise_softmax(output_map):
 
 def pixel_wise_softmax_2(output_map):
     exponential_map = tf.exp(output_map)
-    sum_exp = tf.reduce_sum(exponential_map, 3, keep_dims=True)
+    sum_exp = tf.reduce_sum(exponential_map, axis=3, keep_dims=True)
     tensor_sum_exp = tf.tile(sum_exp, tf.stack([1, 1, 1, tf.shape(output_map)[3]]))
     return tf.div(exponential_map,tensor_sum_exp)
 
-
-
-def cross_entropy(y_,output_map):
-    return -tf.reduce_mean(y_*tf.log(tf.clip_by_value(output_map,1e-10,1.0)), name="cross_entropy")
+def cross_entropy(y_, output_map):
+    return -tf.reduce_mean(y_ * tf.log(tf.clip_by_value(output_map, 2 ** -33, 1.0)), name="cross_entropy")
 #     return tf.reduce_mean(-tf.reduce_sum(y_ * tf.log(output_map), reduction_indices=[1]))
